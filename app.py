@@ -28,9 +28,18 @@ def recommend():
         books = recommender.get_highly_rated_books(top_n=top_n)
         return jsonify({"books": books})
 
-    results = recommender.smart_route_query(query, top_n=top_n)
+    results = recommender.mixed_recommendations(query, top_n_api=top_n,top_n_static=top_n)
     if isinstance(results, dict) and "error" in results:
         return jsonify(results), 404
+    return jsonify({"books": results})
+
+@app.route("/api/mixed_recommend", methods=["POST"])
+def mixed_recommend():
+    data = request.get_json()
+    query = data.get("query", "")
+    top_n_static = int(data.get("top_n_static", 5))
+    top_n_api = int(data.get("top_n_api", 5))
+    results = recommender.mixed_recommendations(query, top_n_static, top_n_api)
     return jsonify({"books": results})
 
 @app.route("/api/recommend/title", methods=["POST"])
@@ -79,17 +88,25 @@ def recommend_by_filters():
     results = recommender.get_recommendations_by_filters(genre, year, mood_keywords, top_n=top_n)
     return jsonify({"books": results})
 
-@app.route("/api/book/<book_id>", methods=["GET"])
-def book_detail(book_id):
+@app.route('/api/book', methods=['GET'])  # remove trailing '/'
+def book_detail():
+    
+    book_id = request.args.get('book_id')
+    print("API called for book_id:", book_id)
+    if not book_id:
+        return jsonify({'error': 'Missing book_id parameter'}), 400
     result = recommender.get_book_by_id(book_id)
     if result is None:
-        return jsonify({"error": "Book not found"}), 404
+        return jsonify({'error': 'Book not found'}), 404
     return jsonify(result)
 
-@app.route("/api/similar/<book_id>", methods=["GET"])
-def similar_books(book_id):
+@app.route('/api/similar', methods=['GET'])
+def similar_books():
+    book_id = request.args.get('book_id')
+    if not book_id:
+        return jsonify({'books': []})
     results = recommender.similar_books_by_id(book_id, top_n=8)
-    return jsonify({"books": results})
+    return jsonify({'books': results})
 
 @app.route("/")
 def health():

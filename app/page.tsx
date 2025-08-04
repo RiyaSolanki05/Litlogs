@@ -115,7 +115,7 @@ export default function HomePage() {
       body: JSON.stringify({
         type: "filters",
         query: "",
-        filters: { year: 2018 },
+        filters: { year: 2015 },
         limit: 12,
       }),
     })

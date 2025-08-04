@@ -8,6 +8,19 @@ from difflib import get_close_matches
 import requests
 from collections import Counter
 
+def to_serializable(obj):
+        if isinstance(obj, dict):
+            return {k: to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, list):
+            return [to_serializable(v) for v in obj]
+        else:
+            return obj
 class BookRecommender:
     def __init__(self, books_csv, ratings_csv):
         # Load datasets
@@ -74,10 +87,17 @@ class BookRecommender:
 
         # Collaborative filtering matrix from ratings
         self.ratings_df = self.ratings_df.rename(columns=lambda x: x.lower())
-        self.ratings_matrix = self.ratings_df.pivot_table(index='user_id', columns='book_id', values='rating')
-        self.ratings_matrix_filled = self.ratings_matrix.fillna(0)
-        self.book_id_to_idx = {book_id: idx for idx, book_id in enumerate(self.ratings_matrix.columns)}
-        self.collaborative_similarity_matrix = cosine_similarity(self.ratings_matrix_filled.T)
+        book_rating_counts = self.ratings_df['book_id'].value_counts()
+        # self.ratings_matrix = self.ratings_df.pivot_table(index='user_id', columns='book_id', values='rating')
+        min_ratings = 100 
+        popular_books = book_rating_counts[book_rating_counts >= min_ratings].index
+        ratings_for_collab = self.ratings_df[self.ratings_df['book_id'].isin(popular_books)]
+        self.pivot = ratings_for_collab.pivot_table(index='user_id', columns='book_id', values='rating')
+        self.pivot = self.pivot.fillna(0)
+        
+        # self.ratings_matrix_filled = self.ratings_matrix.fillna(0)
+        self.book_id_to_idx = {book_id: idx for idx, book_id in enumerate(self.pivot.columns)}
+        self.collaborative_similarity_matrix = cosine_similarity(self.pivot.T)
 
         # Content similarity matrix
         self.content_similarity_matrix = cosine_similarity(self.tfidf_matrix)
@@ -230,32 +250,38 @@ class BookRecommender:
         if 'hybrid_score' in dfout.columns:
             dfout = dfout.sort_values(by='hybrid_score', ascending=False)
         return self.df_to_books(dfout.head(top_n))
+    
 
     def get_book_by_id(self, book_id):
-        row = self.df[self.df['book_id'] == book_id]
+        book_id_int = int(book_id)
+        row = self.df[self.df['book_id'] == book_id_int]
         if row.empty:
             return None
-        row = row.iloc[0]
-        return self.row_to_book(row)
+        
+        book_dict = self.row_to_book(row.iloc[0])
+        return to_serializable(book_dict)
 
     def similar_books_by_id(self, book_id, top_n=8):
-        if book_id not in self.bookid_index:
+        book_id_int = int(book_id)
+        if book_id_int not in self.bookid_index:
             return []
-        base_idx = self.bookid_index[book_id]
+        base_idx = self.bookid_index[book_id_int]
         qvec = self.tfidf.transform([self.df.iloc[base_idx]['combined_content']])
         sims = cosine_similarity(qvec, self.tfidf_matrix).flatten()
         sims[base_idx] = -1
         idxs = np.argpartition(-sims, range(top_n * 2))[:top_n * 2]
         candidates = self.df.iloc[idxs]
-        candidates = candidates[candidates['book_id'] != book_id]
+        candidates = candidates[candidates['book_id'] != book_id_int]
         if len(candidates) < top_n:
             genres = self.df.iloc[base_idx]['Genres']
             by_genre = self.df[self.df['Genres'].apply(lambda glist: any(x in glist for x in genres))]
             by_author = self.df[self.df['authors_ratings'] == self.df.iloc[base_idx]['authors_ratings']]
             fallback = pd.concat([by_genre, by_author]).drop_duplicates()
-            fallback = fallback[fallback['book_id'] != book_id]
+            fallback = fallback[fallback['book_id'] != book_id_int]
             candidates = pd.concat([candidates, fallback]).drop_duplicates().head(top_n)
-        return self.df_to_books(candidates.head(top_n))
+        books = self.df_to_books(candidates.head(top_n))   # list of dicts
+    # NEW: make each book dict serializable
+        return [to_serializable(book) for book in books]
 
     def smart_route_query(self, query: str, top_n=10):
         query_lower = query.lower().strip()
@@ -280,6 +306,37 @@ class BookRecommender:
             return self.get_recommendations_by_author(possible_authors[0], top_n)
 
         return self.get_recommendations_by_keywords(query, top_n)
+    
+    def mixed_recommendations(self, query, top_n_static=5, top_n_api=5):
+    # Get from local ML
+        static_df = pd.DataFrame(self.smart_route_query(query, top_n=top_n_static + 5))
+        if static_df.empty:
+            combined_static = pd.DataFrame()
+        else:
+            top_2 = static_df.head(2)
+            rest = static_df.iloc[2:]
+            if len(rest) > 0:
+                rest_sorted = rest.sort_values(by='year', ascending=False).head(top_n_static - 2)
+            else:
+                rest_sorted = pd.DataFrame()
+        combined_static = pd.concat([top_2, rest_sorted], ignore_index=True)
+        combined_static['source'] = 'Local'
+
+    # Now fetch from API
+        api_results = self.fetch_books_from_google_api(query, max_results=top_n_api)
+        api_df = pd.DataFrame(api_results)
+        if not api_df.empty:
+            api_df['source'] = 'GoogleBooks'
+
+    # Combine both
+        final_df = pd.concat([combined_static, api_df], ignore_index=True)
+    # Fill missing columns for harmony
+        needed_cols = ['source', 'title', 'genres', 'year', 'rating', 'cover', 'description']
+        for col in needed_cols:
+            if col not in final_df.columns:
+                final_df[col] = None
+        return final_df[needed_cols].to_dict(orient='records')
+
 
     def df_to_books(self, df):
         out = []
